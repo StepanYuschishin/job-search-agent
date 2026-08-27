@@ -1,0 +1,27 @@
+# macOS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Secrets and credentials
+.env
+.env.*
+!.env.example
+credentials.json
+token.json
+*.key
+*.pem
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Job Search Agent runtime state
+/state/
+*.log
+
+# Local runtime artifacts
+/traces/
+/runs/
