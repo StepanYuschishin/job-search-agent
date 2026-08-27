@@ -364,6 +364,142 @@ python src/run.py
 
 ---
 
+
+## Quick Start
+
+This repository is designed to run as a personal Job Search Agent on macOS.
+
+The setup flow is:
+
+```text
+Clone repository
+    ↓
+Create local environment configuration
+    ↓
+Add Google OAuth credentials
+    ↓
+Run installer
+    ↓
+Authorize Gmail
+    ↓
+Agent runs automatically on schedule
+```
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/StepanYuschishin/job-search-agent.git
+cd job-search-agent
+```
+
+### 2. Create your local configuration
+
+Copy the example environment file:
+
+```bash
+cp .env.example .env
+```
+
+Open `.env` and configure:
+
+```env
+OPENAI_API_KEY=your_openai_api_key_here
+
+JOB_SEARCH_AGENT_CLASSIFIER_MODEL=gpt-4.1-mini
+JOB_SEARCH_AGENT_SELF_EMAIL=your_email@example.com
+JOB_SEARCH_AGENT_DASHBOARD_RECIPIENT=your_email@example.com
+JOB_SEARCH_AGENT_START_DATE=2026-06-22
+JOB_SEARCH_AGENT_REJECTION_CONFIDENCE=0.95
+JOB_SEARCH_AGENT_MAX_REPLY_BATCH=20
+JOB_SEARCH_AGENT_MAX_RUN_SECONDS=600
+```
+
+Change `JOB_SEARCH_AGENT_START_DATE` to the date from which you want the agent to begin analyzing your job-search email history.
+
+### 3. Create Google OAuth credentials
+
+Create a Google Cloud project and enable the Gmail API.
+
+Create OAuth credentials for a desktop application.
+
+Download the credentials file and place it in the repository root as:
+
+```text
+credentials.json
+```
+
+Do not commit this file.
+
+### 4. Run the installer
+
+```bash
+bash scripts/install.sh
+```
+
+The installer will:
+
+- create a Python virtual environment;
+- install dependencies;
+- validate the application;
+- authenticate Gmail;
+- create the local OAuth token;
+- install the macOS scheduler;
+- run an initial smoke test.
+
+During the first Gmail authorization, Google may open a browser window asking you to sign in and approve access.
+
+### 5. Verify the agent
+
+A successful installation should create:
+
+```text
+token.json
+state/
+job-search-agent.log
+job-search-agent-error.log
+```
+
+The agent is scheduled to run automatically at:
+
+```text
+09:00
+18:00
+```
+
+You can also run it manually:
+
+```bash
+.venv/bin/python src/run.py
+```
+
+### 6. Stop automatic execution
+
+To remove the scheduled LaunchAgent without deleting your local data:
+
+```bash
+bash scripts/uninstall.sh
+```
+
+This does not delete:
+
+- `.env`;
+- `credentials.json`;
+- `token.json`;
+- classification state;
+- rejection reply history;
+- logs.
+
+### Important
+
+The agent has Gmail read access and bounded send access.
+
+It may autonomously send only:
+
+- predefined replies to high-confidence rejection emails that pass all guardrails;
+- its own job-search dashboard.
+
+It does not autonomously apply for jobs, negotiate offers, schedule interviews, or compose arbitrary recruiter messages.
+
 ## Product Decisions
 
 Several design choices were deliberate:
