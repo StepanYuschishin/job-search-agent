@@ -1642,6 +1642,10 @@ def format_job_search_dashboard(
         )
     )
 
+    total_rejection_replies = len(
+        _load_rejection_replies()
+    )
+
     return (
         "JOB SEARCH AGENT DASHBOARD\n"
         "==========================\n\n"
@@ -1651,10 +1655,12 @@ def format_job_search_dashboard(
         f"{totals['applications_submitted']}\n"
         f"Rejections: "
         f"{totals['rejections']}\n"
-        f"Interviews: "
+        f"Interview-stage emails: "
         f"{totals['interviews']}\n"
         f"Recruiter replies: "
-        f"{totals['recruiter_replies']}\n\n"
+        f"{totals['recruiter_replies']}\n"
+        f"Rejection replies sent total: "
+        f"{total_rejection_replies}\n\n"
 
         f"Yesterday ({yesterday['date']}):\n"
         f"+{yesterday['applications_submitted']} applications\n"
