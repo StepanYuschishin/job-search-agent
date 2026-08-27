@@ -412,8 +412,6 @@ job-search-agent/
 │   ├── job_search.py
 │   └── run.py
 ├── state/                    # runtime only, gitignored
-├── deployment/
-│   └── com.stepan.job-search-agent.plist
 ├── docs/
 │   ├── ARCHITECTURE.md
 │   └── PORTFOLIO.md
