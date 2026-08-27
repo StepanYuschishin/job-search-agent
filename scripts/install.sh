@@ -7,7 +7,6 @@ VENV_DIR="$PROJECT_DIR/.venv"
 ENV_FILE="$PROJECT_DIR/.env"
 ENV_EXAMPLE="$PROJECT_DIR/.env.example"
 CREDENTIALS_FILE="$PROJECT_DIR/credentials.json"
-PLIST_TEMPLATE="$PROJECT_DIR/deployment/com.stepan.job-search-agent.plist"
 PLIST_TARGET="$HOME/Library/LaunchAgents/com.job-search-agent.plist"
 
 echo "===================================="
@@ -40,6 +39,7 @@ if [ ! -f "$ENV_FILE" ]; then
         echo "- OPENAI_API_KEY"
         echo "- JOB_SEARCH_AGENT_SELF_EMAIL"
         echo "- JOB_SEARCH_AGENT_DASHBOARD_RECIPIENT"
+        echo "- JOB_SEARCH_AGENT_START_DATE"
         echo ""
         echo "Then run this installer again."
         exit 0
@@ -75,6 +75,7 @@ if [ ! -d "$VENV_DIR" ]; then
     python3 -m venv "$VENV_DIR"
 fi
 
+echo ""
 echo "Installing dependencies..."
 
 "$VENV_DIR/bin/python" -m pip install --upgrade pip
@@ -90,7 +91,7 @@ echo "Compiling Python files..."
 echo "Compile OK"
 
 echo ""
-echo "Running first authentication / smoke test..."
+echo "Running Gmail authentication check..."
 
 "$VENV_DIR/bin/python" - <<'PY'
 from src.job_search import _get_gmail_service
@@ -164,33 +165,31 @@ launchctl bootstrap \
     "$PLIST_TARGET"
 
 echo ""
-echo "Running one scheduled smoke test..."
-
-launchctl kickstart -k \
-    "gui/$(id -u)/com.job-search-agent"
-
-sleep 3
+echo "Scheduler installed successfully."
 
 echo ""
-echo "Scheduler status:"
-
-launchctl print \
-    "gui/$(id -u)/com.job-search-agent" \
-    | grep -E "state =|runs =|last exit code" \
-    || true
+echo "IMPORTANT:"
+echo "The agent has NOT been started automatically."
+echo "Review your .env settings and start date before the first run."
 
 echo ""
 echo "===================================="
 echo " Installation complete"
 echo "===================================="
 echo ""
+
 echo "The Job Search Agent is configured to run at:"
 echo "09:00"
 echo "18:00"
+
 echo ""
 echo "Logs:"
 echo "$PROJECT_DIR/job-search-agent.log"
 echo "$PROJECT_DIR/job-search-agent-error.log"
+
 echo ""
-echo "Manual run:"
+echo "First manual run:"
 echo "$VENV_DIR/bin/python $PROJECT_DIR/src/run.py"
+
+echo ""
+echo "After the first manual run, verify the dashboard and any automated actions."
