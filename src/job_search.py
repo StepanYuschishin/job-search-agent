@@ -39,6 +39,27 @@ from openai import (
 )
 
 
+
+try:
+    from .decision_router import decide_recruiter_action
+    from .hitl import (
+        create_pending_action,
+        find_open_action,
+        get_action,
+        update_pending_action,
+    )
+    from .whatsapp import send_hitl_notification
+except ImportError:
+    from decision_router import decide_recruiter_action
+    from hitl import (
+        create_pending_action,
+        find_open_action,
+        get_action,
+        update_pending_action,
+    )
+    from whatsapp import send_hitl_notification
+
+
 # ---------------------------------------------------------------------------
 # Paths and configuration
 # ---------------------------------------------------------------------------
@@ -534,6 +555,11 @@ Important rules:
 - "Thank you for applying" plus a decision not to proceed is REJECTION.
 - Do not classify generic job alerts or newsletters as applications.
 - Do not infer an application solely because the sender is a recruiter.
+- Emails asking the candidate to complete, finish, resume, or continue an
+  incomplete application are OTHER, not RECRUITER_REPLY and not
+  APPLICATION_CONFIRMATION.
+- Automated reminders about an unfinished application are OTHER unless the
+  email separately confirms that an application was actually submitted.
 
 Email:
 
@@ -793,6 +819,194 @@ def _classify_job_search_emails_between(
             classified_messages,
         "classification_method":
             "llm_semantic_with_local_cache",
+    }
+
+
+
+def send_one_recruiter_reply_to_hitl(
+    start_date: str = DEFAULT_START_DATE,
+    min_confidence: float = 0.75,
+) -> dict:
+    """Escalate at most one recruiter reply to WhatsApp for human review.
+
+    This function never sends a Gmail reply.
+    It creates persistent HITL state and sends only a WhatsApp notification.
+    """
+    abu_dhabi_timezone = timezone(
+        timedelta(hours=4)
+    )
+
+    try:
+        start_datetime = datetime.strptime(
+            start_date,
+            "%Y-%m-%d",
+        ).replace(
+            tzinfo=abu_dhabi_timezone
+        )
+    except ValueError:
+        return {
+            "error": "invalid_start_date",
+            "expected_format": "YYYY-MM-DD",
+        }
+
+    now = datetime.now(
+        abu_dhabi_timezone
+    )
+
+    service = _get_gmail_service()
+
+    snapshot = _classify_job_search_emails_between(
+        service,
+        start_datetime,
+        now,
+    )
+
+    candidates = []
+
+    for message in snapshot.get(
+        "classified_messages",
+        [],
+    ):
+        if message.get("label") != "RECRUITER_REPLY":
+            continue
+
+        sender = str(
+            message.get("from", "")
+        ).lower()
+
+        if (
+            SELF_EMAIL
+            and SELF_EMAIL in sender
+        ):
+            continue
+
+        confidence = float(
+            message.get("confidence")
+            or 0.0
+        )
+
+        if confidence < min_confidence:
+            continue
+
+        if find_open_action(
+            gmail_message_id=message.get(
+                "id",
+                "",
+            ),
+            gmail_thread_id=message.get(
+                "thread_id",
+                "",
+            ),
+        ):
+            continue
+
+        candidates.append(
+            message
+        )
+
+    def message_timestamp(
+        message: dict,
+    ) -> float:
+        raw_date = message.get(
+            "date",
+            "",
+        )
+
+        if not raw_date:
+            return 0.0
+
+        try:
+            parsed = parsedate_to_datetime(
+                raw_date
+            )
+
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(
+                    tzinfo=timezone.utc
+                )
+
+            return parsed.timestamp()
+
+        except (
+            TypeError,
+            ValueError,
+            OverflowError,
+        ):
+            return 0.0
+
+    candidates.sort(
+        key=message_timestamp,
+        reverse=True,
+    )
+
+    if not candidates:
+        return {
+            "status": "no_hitl_candidate",
+            "min_confidence":
+                min_confidence,
+        }
+
+    message = candidates[0]
+
+    decision = decide_recruiter_action(
+        message
+    )
+
+    recommended_action = decision.get(
+        "recommended_action",
+        "REVIEW",
+    )
+
+    action = create_pending_action(
+        message,
+        recommended_action=recommended_action,
+        decision_confidence=decision.get(
+            "confidence",
+            0.0,
+        ),
+        decision_reason=decision.get(
+            "reason",
+            "",
+        ),
+    )
+
+    update_pending_action(
+        action_id=action["id"],
+        status="PENDING_HUMAN",
+        result={
+            "whatsapp_notification":
+                whatsapp_result,
+        },
+    )
+
+    return {
+        "status": "hitl_sent",
+        "action_id":
+            action["id"],
+        "gmail_message_id":
+            message.get("id"),
+        "gmail_thread_id":
+            message.get("thread_id"),
+        "subject":
+            message.get("subject"),
+        "from":
+            message.get("from"),
+        "classification":
+            message.get("label"),
+        "confidence":
+            message.get("confidence"),
+        "recommended_action":
+            recommended_action,
+        "decision_confidence":
+            decision.get(
+                "confidence",
+                0.0,
+            ),
+        "decision_reason":
+            decision.get(
+                "reason",
+                "",
+            ),
     }
 
 
@@ -1388,6 +1602,215 @@ def send_all_replyable_rejections(
         "results":
             results,
     }
+
+
+
+
+def send_approved_draft(
+    action_id: str,
+    execute: bool = False,
+) -> dict:
+    """Send one human-approved draft into its original Gmail thread.
+
+    execute=False performs a dry run and never sends Gmail.
+    """
+
+    action = get_action(
+        action_id
+    )
+
+    if not action:
+        return {
+            "status": "skipped",
+            "reason": "unknown_action",
+            "action_id": action_id,
+        }
+
+    if action.get(
+        "status"
+    ) != "SEND_APPROVED":
+        return {
+            "status": "skipped",
+            "reason": "action_not_send_approved",
+            "action_id": action_id,
+            "action_status": action.get(
+                "status"
+            ),
+        }
+
+    draft = str(
+        action.get(
+            "draft",
+            "",
+        )
+    ).strip()
+
+    if not draft:
+        return {
+            "status": "skipped",
+            "reason": "draft_missing",
+            "action_id": action_id,
+        }
+
+    message_id = str(
+        action.get(
+            "gmail_message_id",
+            "",
+        )
+    ).strip()
+
+    if not message_id:
+        return {
+            "status": "skipped",
+            "reason": "gmail_message_id_missing",
+            "action_id": action_id,
+        }
+
+    service = _get_gmail_service()
+
+    original = _get_gmail_message_summary(
+        service,
+        message_id,
+    )
+
+    sender = original.get(
+        "from",
+        "",
+    )
+
+    reply_to = original.get(
+        "reply_to",
+        "",
+    )
+
+    recipient = (
+        reply_to
+        or sender
+    )
+
+    if _is_self_address(
+        sender
+    ):
+        return {
+            "status": "skipped",
+            "reason": "self_sender",
+            "action_id": action_id,
+        }
+
+    if _is_self_address(
+        recipient
+    ):
+        return {
+            "status": "skipped",
+            "reason": "self_recipient",
+            "action_id": action_id,
+        }
+
+    recipient_lower = recipient.lower()
+
+    if any(
+        term in recipient_lower
+        for term in BLOCKED_SENDER_TERMS
+    ):
+        return {
+            "status": "skipped",
+            "reason": "blocked_recipient",
+            "recipient": recipient,
+            "action_id": action_id,
+        }
+
+    subject = original.get(
+        "subject",
+        "",
+    )
+
+    if subject.lower().startswith(
+        "re:"
+    ):
+        reply_subject = subject
+    else:
+        reply_subject = (
+            f"Re: {subject}"
+        )
+
+    thread_id = original.get(
+        "thread_id",
+        "",
+    )
+
+    if not execute:
+        return {
+            "status": "dry_run",
+            "action_id": action_id,
+            "original_message_id": message_id,
+            "thread_id": thread_id,
+            "recipient": recipient,
+            "subject": reply_subject,
+            "draft": draft,
+        }
+
+    reply = EmailMessage()
+
+    reply["To"] = recipient
+    reply["From"] = "me"
+    reply["Subject"] = reply_subject
+
+    message_header_id = original.get(
+        "message_header_id",
+        "",
+    )
+
+    if message_header_id:
+        reply["In-Reply-To"] = (
+            message_header_id
+        )
+        reply["References"] = (
+            message_header_id
+        )
+
+    reply.set_content(
+        draft
+    )
+
+    encoded_message = base64.urlsafe_b64encode(
+        reply.as_bytes()
+    ).decode(
+        "utf-8"
+    )
+
+    sent = _execute_gmail_request(
+        service.users()
+        .messages()
+        .send(
+            userId="me",
+            body={
+                "raw": encoded_message,
+                "threadId": thread_id,
+            },
+        )
+    )
+
+    result = {
+        "status": "sent",
+        "action_id": action_id,
+        "original_message_id": message_id,
+        "sent_message_id": sent.get(
+            "id"
+        ),
+        "thread_id": sent.get(
+            "threadId"
+        ),
+        "recipient": recipient,
+        "subject": reply_subject,
+    }
+
+    update_pending_action(
+        action_id=action_id,
+        status="COMPLETED",
+        result=result,
+    )
+
+    return result
 
 
 # ---------------------------------------------------------------------------
