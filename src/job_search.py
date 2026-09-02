@@ -867,16 +867,52 @@ def send_one_recruiter_reply_to_hitl(
         "classified_messages",
         [],
     ):
-        if message.get("label") != "RECRUITER_REPLY":
+        label = message.get(
+            "label"
+        )
+
+        if label not in {
+            "RECRUITER_REPLY",
+            "REJECTION",
+        }:
             continue
 
         sender = str(
             message.get("from", "")
         ).lower()
 
-        if (
-            SELF_EMAIL
-            and SELF_EMAIL in sender
+        reply_to = str(
+            message.get("reply_to", "")
+        ).lower()
+
+        subject = str(
+            message.get("subject", "")
+        ).lower()
+
+        effective_reply_address = (
+            reply_to
+            or sender
+        )
+
+        if _is_self_address(
+            sender
+        ):
+            continue
+
+        if _is_self_address(
+            effective_reply_address
+        ):
+            continue
+
+        if any(
+            term in subject
+            for term in BLOCKED_SUBJECT_TERMS
+        ):
+            continue
+
+        if any(
+            term in effective_reply_address
+            for term in BLOCKED_SENDER_TERMS
         ):
             continue
 
@@ -885,8 +921,24 @@ def send_one_recruiter_reply_to_hitl(
             or 0.0
         )
 
-        if confidence < min_confidence:
-            continue
+        if label == "RECRUITER_REPLY":
+            if confidence < min_confidence:
+                continue
+
+        elif label == "REJECTION":
+            is_ambiguous_rejection = (
+                confidence
+                < REJECTION_CONFIDENCE_THRESHOLD
+                or not _rejection_has_semantic_evidence(
+                    message.get(
+                        "reason",
+                        "",
+                    )
+                )
+            )
+
+            if not is_ambiguous_rejection:
+                continue
 
         if find_open_action(
             gmail_message_id=message.get(
@@ -957,6 +1009,12 @@ def send_one_recruiter_reply_to_hitl(
         "REVIEW",
     )
 
+    if (
+        message.get("label") == "REJECTION"
+        and recommended_action == "AUTO"
+    ):
+        recommended_action = "REVIEW"
+
     action = create_pending_action(
         message,
         recommended_action=recommended_action,
@@ -968,6 +1026,10 @@ def send_one_recruiter_reply_to_hitl(
             "reason",
             "",
         ),
+    )
+
+    whatsapp_result = send_hitl_notification(
+        action
     )
 
     update_pending_action(

@@ -59,6 +59,9 @@ Important rules:
 - If the email does not clearly need a reply, produce a polite optional
   acknowledgement rather than inventing a reason to continue the conversation.
 - The draft must be safe for human review. It will not be sent automatically.
+- Never use placeholders such as "[Candidate Name]", "[Your Name]", or similar.
+- Sign the draft with "Stepan" when a sign-off is appropriate.
+
 
 Recruiter email:
 

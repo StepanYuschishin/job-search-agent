@@ -24,6 +24,11 @@ except ImportError:
         record_human_decision,
     )
 
+try:
+    from .whatsapp import send_text_message
+except ImportError:
+    from whatsapp import send_text_message
+
 
 load_dotenv()
 
@@ -98,6 +103,12 @@ def _process_human_command(
     text: str,
 ) -> dict:
     command = text.strip().upper()
+
+    if command == "HELP":
+        return {
+            "status": "help_requested",
+            "command": command,
+        }
 
     if command == "DRAFT":
         action = get_latest_pending_action()
@@ -345,6 +356,20 @@ class WhatsAppWebhookHandler(
                 print(
                     result
                 )
+
+                if result.get("status") in {
+                    "help_requested",
+                    "ignored_command",
+                }:
+                    send_text_message(
+                        "JOB SEARCH AGENT\n\n"
+                        "Available commands:\n"
+                        "DRAFT - generate a reply draft\n"
+                        "SEND - send an approved draft\n"
+                        "EDIT - request changes\n"
+                        "IGNORE - close the current action\n"
+                        "HELP - show these commands"
+                    )
 
         except Exception as error:
             print(
