@@ -1,4 +1,4 @@
-# Job Search Agent — Architecture
+# Job Search Agent — V2 Architecture
 
 ## 1. High-Level Architecture
 
@@ -9,32 +9,64 @@ macOS launchd
         ↓
 Run Orchestrator
         ↓
-Gmail Retrieval
+Gmail Discovery + Retrieval
         ↓
 Semantic Classification
         ↓
-Persistent Local State
+Persistent State
         ↓
-Decision & Guardrail Layer
+Decision Layer
         ↓
-┌─────────────────────────────┬─────────────────────────────┐
-│ Analytics Path              │ Rejection Automation Path   │
-│                             │                             │
-│ Aggregate metrics           │ Detect rejection            │
-│ Generate dashboard          │ Evaluate replyability       │
-│ Send dashboard email        │ Enforce guardrails          │
-│                             │ Prevent duplicate replies   │
-│                             │ Send bounded reply          │
-└─────────────────────────────┴─────────────────────────────┘
+Deterministic Guardrails
+        ↓
+┌────────────────────────────┬──────────────────────────────┐
+│ SAFE / CONSTRAINED         │ JUDGMENT REQUIRED            │
+│                            │                              │
+│ Autonomous action          │ WhatsApp HITL                │
+│                            │      ↓                       │
+│ Predefined rejection reply │ Human decision               │
+│ Dashboard delivery         │      ↓                       │
+│                            │ Draft generation             │
+│                            │      ↓                       │
+│                            │ Human approval               │
+│                            │      ↓                       │
+│                            │ Final safety checks          │
+└────────────────────────────┴──────────────┬───────────────┘
+                                           ↓
+                                         Gmail
 ```
+
+The core architectural principle is:
+
+**probabilistic reasoning does not equal execution authority.**
+
+The LLM interprets and recommends.
+Application policy decides what path is allowed.
+Humans handle judgment-sensitive actions.
+Deterministic code controls final execution.
+
+---
 
 ## 2. Core Components
 
 ### Scheduler
 
-macOS `launchd` triggers the agent automatically on schedule.
+macOS `launchd`
 
-The scheduler is configured separately from the application logic so the agent can also be executed manually for testing and debugging.
+Production schedule:
+
+```text
+09:00
+18:00
+```
+
+The same runtime can also be started manually:
+
+```bash
+.venv/bin/python src/run.py
+```
+
+---
 
 ### Run Orchestrator
 
@@ -42,341 +74,461 @@ The scheduler is configured separately from the application logic so the agent c
 
 Coordinates one complete agent execution:
 
-1. discover replyable rejection emails;
-2. send permitted predefined replies;
-3. generate job-search analytics;
-4. email the dashboard;
-5. terminate if the run exceeds the configured maximum runtime.
+1. run safe rejection automation;
+2. discover recruiter / ambiguous-rejection HITL candidates;
+3. process requested drafts;
+4. process approved sends;
+5. calculate analytics;
+6. deliver dashboard;
+7. enforce maximum runtime boundaries.
 
-The orchestrator does not contain the core Gmail or classification logic. Its responsibility is execution sequencing and runtime control.
+The orchestrator sequences capabilities but does not own the underlying Gmail, HITL, drafting, or decision logic.
 
-### Core Agent Logic
+---
+
+### Core Job Search Logic
 
 `src/job_search.py`
 
-Contains the main job-search system capabilities:
+Contains:
 
 - Gmail authentication;
 - candidate email discovery;
-- message retrieval and parsing;
+- retrieval and parsing;
 - semantic classification;
-- persistent state management;
-- rejection decision logic;
+- classification cache;
+- rejection automation;
+- rejection guardrails;
+- recruiter HITL discovery;
+- ambiguous rejection routing;
 - duplicate protection;
-- bounded email actions;
-- dashboard calculation;
+- Gmail execution;
+- analytics;
 - dashboard delivery.
 
-### Gmail Integration
+---
 
-The system uses the Gmail API with OAuth 2.0 authorization.
+### Decision Router
 
-Gmail is the primary external environment from which the agent:
+`src/decision_router.py`
 
-- discovers recruiting emails;
-- retrieves message metadata and content;
-- identifies conversation threads;
-- sends permitted predefined rejection replies;
-- sends its own analytics dashboard.
+The decision router evaluates recruiter-related interactions after classification.
 
-Write authority is deliberately constrained by application-level guardrails.
+Supported recommendations:
 
-### Semantic Classification
+```text
+DRAFT
+REVIEW
+IGNORE
+AUTO
+```
 
-New candidate messages are classified with an LLM into one of five hiring states:
+A recommendation does not itself authorize an external action.
 
-- `APPLICATION_CONFIRMATION`
-- `REJECTION`
-- `INTERVIEW`
-- `RECRUITER_REPLY`
-- `OTHER`
+For ambiguous rejection cases, `AUTO` is explicitly downgraded to `REVIEW`.
 
-Each classification contains:
+---
+
+### Draft Generator
+
+`src/draft_generator.py`
+
+Generates human-reviewed recruiter replies.
+
+Draft rules include:
+
+- do not invent facts;
+- do not invent commitments or availability;
+- do not use placeholders such as `[Candidate Name]`;
+- use `Stepan` as sign-off when appropriate;
+- never send automatically.
+
+Generated drafts enter an explicit approval state before Gmail execution.
+
+---
+
+### HITL State Manager
+
+`src/hitl.py`
+
+Maintains persistent human-review actions across separate processes and scheduled executions.
+
+Primary state file:
+
+```text
+state/pending-actions.json
+```
+
+The HITL layer ensures that a WhatsApp decision made later can still be associated with the correct Gmail message, thread, recommendation, and draft.
+
+---
+
+### WhatsApp Integration
+
+`src/whatsapp.py`
+
+Uses the WhatsApp Cloud API for outbound interaction.
+
+Responsibilities include:
+
+- sending HITL notifications;
+- sending generated drafts for approval;
+- sending command/help responses.
+
+WhatsApp acts as the lightweight control surface for the agent.
+
+---
+
+### Webhook
+
+`src/webhook.py`
+
+Receives inbound WhatsApp messages through Meta Webhooks.
+
+Supported commands:
+
+```text
+DRAFT
+SEND
+EDIT
+IGNORE
+HELP
+```
+
+Unknown commands do not modify state and return the supported command list.
+
+---
+
+## 3. Semantic Classification
+
+Relevant Gmail messages are classified into:
+
+```text
+APPLICATION_CONFIRMATION
+REJECTION
+INTERVIEW
+RECRUITER_REPLY
+OTHER
+```
+
+Each result includes:
 
 - label;
 - confidence;
 - semantic reason.
 
-The classifier evaluates the meaning of the message rather than depending only on exact keyword matches.
+The classifier answers:
 
-### Persistent Local State
+**What happened in this email?**
 
-Runtime state is stored locally under:
+It does not decide whether an external action is permitted.
+
+---
+
+## 4. Persistent State
+
+Runtime state lives under:
 
 ```text
 state/
 ```
 
-The state directory is created automatically and excluded from source control.
+and is excluded from Git.
 
-#### Classification Cache
+### Classification Cache
 
-`state/job-search-classifications.json`
+```text
+state/job-search-classifications.json
+```
 
-Stores previously processed email metadata and classification results, including:
-
-- classification;
-- confidence;
-- semantic reason;
-- thread ID;
-- date;
-- subject;
-- sender;
-- reply-to;
-- snippet.
+Stores processed message metadata and classification results.
 
 Purpose:
 
-Avoid repeatedly retrieving full historical messages and paying for repeated LLM classification.
+- avoid repeated Gmail retrieval;
+- avoid repeated LLM classification;
+- support incremental processing.
 
-#### Rejection Reply Ledger
+### Rejection Reply Ledger
 
-`state/rejection-replies.json`
+```text
+state/rejection-replies.json
+```
 
-Stores successfully handled rejection messages and Gmail thread IDs.
+Stores handled Gmail message and thread IDs.
 
 Purpose:
 
-Provide idempotency and prevent duplicate autonomous replies.
+- message-level idempotency;
+- thread-level idempotency;
+- duplicate-send prevention.
 
-## 3. Agent Flow
-
-### Step 1 — Trigger
-
-The system starts through either:
-
-- macOS `launchd`; or
-- manual execution of `src/run.py`.
-
-Scheduled execution does not require Cursor or Terminal to remain open.
-
-### Step 2 — Discover Candidate Emails
-
-The agent searches Gmail for a broad candidate set using job-search-related concepts such as:
-
-- application;
-- candidate;
-- recruiter;
-- interview;
-- hiring;
-- position;
-- role;
-- rejection-related language.
-
-Results from multiple searches are deduplicated by Gmail message ID.
-
-### Step 3 — Retrieve or Reuse State
-
-For each candidate message:
+### HITL Action State
 
 ```text
-Classification + metadata already cached?
-        │
-   ┌────┴────┐
-  YES        NO
-   │          │
-Reuse      Retrieve message
-state      from Gmail
-              ↓
-           Extract content
-              ↓
-           Classify with LLM
-              ↓
-           Persist result
+state/pending-actions.json
 ```
 
-This makes historical processing incremental rather than repeatedly recomputing the entire mailbox state.
+Stores human-review actions across their lifecycle.
 
-### Step 4 — Semantic Classification
+Purpose:
 
-The LLM determines the most specific hiring state represented by each message.
+- preserve context between WhatsApp input and later scheduled runs;
+- connect Gmail messages to recommendations, drafts, approvals, and outcomes.
 
-For example:
+---
 
-```text
-"Thank you for applying, but we decided to move forward
-with another candidate."
-```
+## 5. Autonomous Rejection Path
 
-is classified as:
+A message classified as `REJECTION` is not automatically replyable.
 
-```text
-REJECTION
-```
-
-rather than:
-
-```text
-APPLICATION_CONFIRMATION
-```
-
-because the final hiring state takes precedence over generic acknowledgement language.
-
-### Step 5 — Rejection Decision
-
-Emails classified as `REJECTION` are not automatically answered merely because of their label.
-
-They must pass additional deterministic guardrails.
-
-The decision path is approximately:
+It must pass the full guardrail chain.
 
 ```text
 REJECTION
     ↓
-confidence >= threshold
+confidence >= configured threshold
     ↓
-explicit rejection evidence
+semantic rejection evidence exists
     ↓
-replyable sender
+sender / reply-to is allowed
     ↓
-safe subject
+subject is allowed
     ↓
 not self-sent
     ↓
-message not previously answered
+message not already handled
     ↓
-thread not previously answered
+thread not already handled
     ↓
-within batch safety bound
+within configured batch bound
     ↓
 SEND PREDEFINED REPLY
 ```
 
-If any required condition fails:
+If a required safety condition fails, the autonomous send path is blocked.
+
+Some failures represent an unsafe destination and are simply skipped.
+
+Others represent ambiguity and may enter HITL instead.
+
+---
+
+## 6. Ambiguous Rejection Routing
+
+V2 distinguishes between:
 
 ```text
-DO NOT SEND
+SAFE REJECTION
+→ deterministic autonomous path
 ```
 
-The LLM therefore contributes semantic judgment, while deterministic code controls whether an external action is permitted.
+and:
 
-## 4. Duplicate Protection
+```text
+AMBIGUOUS REJECTION
+→ human review
+```
 
-Autonomous replies are protected at two levels:
+A rejection can be considered ambiguous when:
 
-### Message-level protection
+- classification confidence is below the autonomous threshold; or
+- semantic rejection evidence is insufficient.
 
-A Gmail message ID that has already been handled cannot trigger another reply.
+If safety constraints allow human review, the case can enter the same HITL path used for recruiter interactions.
 
-### Thread-level protection
+This prevents uncertainty from being silently converted into autonomous communication.
 
-A different message inside an already-handled Gmail conversation cannot trigger another autonomous reply.
+---
 
-Together these protections make the write operation effectively idempotent across repeated scheduled executions.
+## 7. Recruiter HITL Flow
 
-## 5. Analytics Pipeline
+Recruiter interactions above the HITL confidence threshold can enter human review.
 
-The classified message snapshot is reused to calculate multiple job-search windows:
+```text
+RECRUITER_REPLY
+       ↓
+Safety filtering
+       ↓
+Decision router
+       ↓
+Recommended action
+       ↓
+Create persistent HITL action
+       ↓
+WhatsApp notification
+       ↓
+PENDING_HUMAN
+```
+
+The WhatsApp notification contains:
+
+- sender;
+- subject;
+- classification;
+- classification confidence;
+- classification reason;
+- recommended action;
+- decision confidence;
+- decision reason;
+- action ID.
+
+---
+
+## 8. HITL State Machine
+
+### Initial review
+
+```text
+PENDING_HUMAN
+   ├── DRAFT
+   │     ↓
+   │ DRAFT_REQUESTED
+   │     ↓
+   │ Draft generation
+   │     ↓
+   │ AWAITING_APPROVAL
+   │
+   └── IGNORE
+         ↓
+      IGNORED
+```
+
+### Draft approval
+
+```text
+AWAITING_APPROVAL
+   ├── SEND
+   │     ↓
+   │ SEND_APPROVED
+   │     ↓
+   │ Final execution checks
+   │     ↓
+   │ Gmail send / blocked result
+   │
+   ├── EDIT
+   │     ↓
+   │ Revision path
+   │
+   └── IGNORE
+         ↓
+      IGNORED
+```
+
+Human interaction and execution can therefore occur in completely separate processes.
+
+---
+
+## 9. Human Approval Is Not Execution Authority
+
+A `SEND` command means:
+
+**The human approves this draft.**
+
+It does not mean:
+
+**Bypass all safety rules.**
+
+Before Gmail execution, deterministic checks still apply.
+
+This architecture was validated in a controlled end-to-end self-send test:
+
+```text
+Gmail message
+→ HITL
+→ DRAFT
+→ draft generation
+→ AWAITING_APPROVAL
+→ SEND
+→ SEND_APPROVED
+→ final safety layer
+→ BLOCKED by self-sender guardrail
+```
+
+The pipeline therefore reached the execution boundary successfully and stopped for the intended safety reason.
+
+---
+
+## 10. WhatsApp Interaction Model
+
+WhatsApp is intentionally command-based rather than conversationally unrestricted.
+
+### Pending human decision
+
+```text
+DRAFT
+IGNORE
+```
+
+### Draft awaiting approval
+
+```text
+SEND
+EDIT
+IGNORE
+```
+
+### Utility
+
+```text
+HELP
+```
+
+Unknown commands are handled safely.
+
+Current commands operate on the latest relevant open action rather than requiring the user to manually provide an action ID.
+
+---
+
+## 11. Duplicate and Safety Protection
+
+The system uses multiple independent controls:
+
+- classification confidence;
+- semantic evidence;
+- blocked sender checks;
+- blocked subject checks;
+- self-sender guardrail;
+- message-level reply ledger;
+- thread-level reply ledger;
+- open HITL-action detection;
+- explicit human approval;
+- final deterministic execution checks;
+- bounded batch execution.
+
+The design assumes that no individual layer is sufficient by itself.
+
+---
+
+## 12. Analytics Pipeline
+
+The classified message snapshot is reused for job-search metrics.
+
+This avoids separate Gmail and LLM passes for each reporting window.
+
+The dashboard can include:
 
 - cumulative applications;
 - cumulative rejections;
-- yesterday's activity;
-- last seven days of activity.
+- recent activity;
+- rejection reply metrics;
+- runtime information.
 
-The system does not perform a separate historical Gmail + LLM pass for every dashboard metric.
+Dashboard delivery is itself a narrowly permitted autonomous write action.
 
-This reduces:
+---
 
-- API calls;
-- LLM calls;
-- latency;
-- cost;
-- failure surface.
+## 13. Reliability Evolution
 
-## 6. Dashboard Delivery
-
-Each scheduled run can generate and email a dashboard containing:
-
-- cumulative application count;
-- cumulative rejection count;
-- yesterday's activity;
-- last seven days of activity;
-- autonomous actions performed during the run;
-- system execution information.
-
-Dashboard delivery is itself a narrowly defined write action: the system may send its own predefined operational report, but this does not grant general-purpose email authority.
-
-## 7. Autonomy Boundary
-
-The system intentionally has bounded autonomy.
-
-### The agent may autonomously
-
-- retrieve job-search emails;
-- classify recruiting messages;
-- maintain persistent state;
-- calculate analytics;
-- identify safe rejection responses;
-- send predefined rejection replies when all guardrails pass;
-- send its own scheduled dashboard.
-
-### The agent may not autonomously
-
-- compose arbitrary recruiter messages;
-- negotiate salary;
-- accept or reject offers;
-- schedule interviews;
-- modify applications;
-- apply for jobs;
-- respond to ambiguous hiring messages;
-- bypass confidence, sender, duplicate, or thread guardrails.
-
-The design principle is:
-
-> Grant autonomy only where the cost of a wrong action is low and the action can be constrained by explicit, testable rules.
-
-## 8. Failure Bounds
-
-The system contains explicit runtime and action boundaries.
-
-### Runtime bound
-
-A run has a maximum allowed execution time.
-
-If that ceiling is exceeded, the process terminates instead of hanging indefinitely.
-
-### Confidence bound
-
-External rejection replies require high-confidence semantic classification.
-
-### Action bound
-
-The system has no general-purpose email composition capability in its autonomous workflow.
-
-### Duplicate bound
-
-Persistent message and thread state prevents repeated external actions across runs.
-
-These controls move critical safety decisions out of prompt instructions and into deterministic application logic.
-
-## 9. Architecture Evolution
-
-### V1 — Repeated Historical Processing
-
-The initial implementation repeatedly:
-
-- searched historical Gmail;
-- fetched full messages;
-- performed semantic classification;
-- recalculated different dashboard windows through repeated processing.
+The original implementation repeatedly processed historical Gmail data.
 
 Observed runtime:
 
 ```text
-~10–30 minutes
+10–30 minutes
 ```
 
-Some executions became stuck significantly longer.
-
-### V2 — Stateful Incremental Processing
-
-The architecture was redesigned to:
-
-- persist classification metadata;
-- reuse historical classifications;
-- avoid repeated full-message retrieval;
-- avoid repeated LLM classification;
-- calculate multiple analytics windows from one classified snapshot.
+V2 reuses persistent classification state and performs incremental processing.
 
 Observed cached runtime:
 
@@ -384,52 +536,119 @@ Observed cached runtime:
 ~9 seconds
 ```
 
-Compared with a typical 10-minute execution, this represents approximately a:
+Compared with a representative 10-minute run, this is approximately a:
 
 ```text
 60× runtime improvement
 ```
 
-The important architectural change was not merely optimization of individual API calls.
-
-It was the transition from:
+The architectural improvement came primarily from changing:
 
 ```text
-recompute historical state every run
+stateless historical recomputation
 ```
 
-to:
+into:
 
 ```text
-persist state → process new information → reuse known state
+stateful incremental processing
 ```
 
-## 10. Repository Architecture
+---
+
+## 14. Security Boundary
+
+The repository intentionally excludes:
 
 ```text
-job-search-agent/
-├── src/
-│   ├── job_search.py
-│   └── run.py
-├── state/                    # runtime only, gitignored
-├── docs/
-│   ├── ARCHITECTURE.md
-│   └── PORTFOLIO.md
-├── assets/
-│   └── job-search-agent-architecture.png
-├── .env.example
-├── .gitignore
-├── requirements.txt
-├── LICENSE
-└── README.md
+.env
+credentials.json
+token.json
+state/
+*.log
+.venv/
 ```
 
-The repository separates:
+Secrets and OAuth tokens remain local.
 
-- **product logic** — `src/`;
-- **runtime state** — `state/`;
-- **scheduler configuration** — `deployment/`;
-- **architecture/product documentation** — `docs/`;
-- **public assets** — `assets/`.
+WhatsApp, Gmail, and OpenAI credentials are provided through local environment configuration.
 
-This keeps the public repository reproducible while excluding credentials, OAuth tokens, personal email state, and other runtime artifacts.
+The system never relies on GitHub as a runtime secret store.
+
+---
+
+## 15. Current Control Model
+
+The system now has three distinct levels of authority.
+
+### Level 1 — Observe
+
+The agent may independently:
+
+- retrieve;
+- classify;
+- analyze;
+- maintain state.
+
+### Level 2 — Bounded Autonomy
+
+The agent may independently execute actions only when an explicit policy and deterministic guardrails permit them.
+
+Current examples:
+
+- predefined safe rejection reply;
+- dashboard delivery.
+
+### Level 3 — Human-in-the-Loop
+
+Higher-judgment communication requires human involvement.
+
+Current examples:
+
+- recruiter interactions;
+- ambiguous rejection cases;
+- generated recruiter replies.
+
+The autonomy boundary is therefore a first-class architectural component rather than an implicit LLM decision.
+
+---
+
+## 16. V2 End-to-End Flow
+
+```text
+macOS launchd
+      ↓
+src/run.py
+      ↓
+Gmail
+      ↓
+Discovery / Retrieval
+      ↓
+Classification
+      ↓
+Persistent State
+      ↓
+Decision
+      ↓
+       safe enough?
+      /            \
+    YES            NO / JUDGMENT
+     ↓                  ↓
+Bounded action       WhatsApp
+     ↓                  ↓
+Guardrails          Recommendation
+     ↓                  ↓
+Execution          Human decision
+                        ↓
+                      Draft
+                        ↓
+                     Approval
+                        ↓
+                 Final guardrails
+                        ↓
+                      Gmail
+```
+
+This is the central V2 product model:
+
+**the agent acts alone when the action is constrained enough, and asks when judgment matters.**
