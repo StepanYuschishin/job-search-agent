@@ -114,6 +114,18 @@ Return JSON only:
                 .strip()
             )
 
+            # Models may wrap valid JSON in a Markdown code fence.
+            if text.startswith("```"):
+                lines = text.splitlines()
+
+                if lines:
+                    lines = lines[1:]
+
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+
+                text = "\n".join(lines).strip()
+
             try:
                 result = json.loads(
                     text

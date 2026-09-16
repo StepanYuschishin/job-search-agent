@@ -140,6 +140,19 @@ def _process_draft_requests() -> dict:
                 )
             )
 
+            # Fail closed: an empty or invalid draft must never
+            # be presented to the user as ready for approval.
+            if not draft_result.get("draft", "").strip():
+                raise ValueError(
+                    "Draft generation failed: "
+                    + str(
+                        draft_result.get(
+                            "reason",
+                            "empty_draft",
+                        )
+                    )
+                )
+
             # Send the approval card first.
             # If WhatsApp fails, the action remains
             # DRAFT_REQUESTED and can be retried.
@@ -259,6 +272,20 @@ def _process_send_approvals() -> dict:
                 "status"
             ) == "sent":
                 sent += 1
+
+            elif (
+                result.get("status") == "skipped"
+                and result.get("reason") in {
+                    "self_sender",
+                    "self_recipient",
+                    "blocked_recipient",
+                }
+            ):
+                update_pending_action(
+                    action_id=action_id,
+                    status="COMPLETED",
+                    result=result,
+                )
 
             results.append(
                 result
