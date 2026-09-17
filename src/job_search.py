@@ -561,6 +561,36 @@ Important rules:
 - Automated reminders about an unfinished application are OTHER unless the
   email separately confirms that an application was actually submitted.
 
+Location classification:
+- For APPLICATION_CONFIRMATION, determine the geographic market of the
+  application semantically and return exactly one location_group:
+  UAE
+  GERMANY
+  SINGAPORE
+  OTHER
+  UNKNOWN
+- GERMANY: GmbH is a deterministic Germany identifier. If the relevant
+  employer or legal entity is a GmbH, classify as GERMANY. Germany is NOT
+  limited to GmbH. Also use German locations, employer/legal context,
+  recruiting/employment context, market context, and other strong semantic
+  evidence connecting the application to Germany.
+- UAE: use UAE when the application context indicates the United Arab
+  Emirates through location, employer/legal context, recruiting/employment
+  context, market context, or other strong semantic evidence.
+- SINGAPORE: use SINGAPORE when the application context indicates Singapore
+  through location, employer/legal context, recruiting/employment context,
+  market context, or other strong semantic evidence.
+- OTHER: use OTHER only when there is meaningful evidence for another
+  geographic market outside UAE, Germany, and Singapore.
+- UNKNOWN: use UNKNOWN when evidence is insufficient. Lack of evidence is
+  UNKNOWN, not OTHER.
+- Classify semantically, not by a fixed keyword or city list.
+- Employer identity, legal entity, recruiting context, employment context,
+  job title, and market scope may be used as evidence.
+- Do not use the candidate's own address, CV, previous employers, or work
+  history as geography evidence.
+- For any label other than APPLICATION_CONFIRMATION, use UNKNOWN.
+
 Email:
 
 From: {email_data.get("from", "")}
@@ -575,7 +605,8 @@ Return JSON only:
 {{
   "label": "APPLICATION_CONFIRMATION|REJECTION|INTERVIEW|RECRUITER_REPLY|OTHER",
   "confidence": 0.0,
-  "reason": "short explanation"
+  "reason": "short explanation",
+  "location_group": "UAE|GERMANY|SINGAPORE|OTHER|UNKNOWN"
 }}
 """
 
@@ -594,6 +625,17 @@ Return JSON only:
                 .strip()
             )
 
+            if text.startswith("```"):
+                lines = text.splitlines()
+
+                if lines and lines[0].startswith("```"):
+                    lines = lines[1:]
+
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+
+                text = "\n".join(lines).strip()
+
             try:
                 return json.loads(text)
 
@@ -602,6 +644,7 @@ Return JSON only:
                     "label": "OTHER",
                     "confidence": 0.0,
                     "reason": "classifier_invalid_json",
+                    "location_group": "UNKNOWN",
                 }
 
         except (
@@ -656,6 +699,12 @@ def _classify_job_search_emails_between(
             and cached_record.get(
                 "subject"
             ) is not None
+            and not (
+                cached_record.get("label")
+                == "APPLICATION_CONFIRMATION"
+                and "location_group"
+                not in cached_record
+            )
         ):
             email_data = {
                 "id": message_id,
@@ -697,6 +746,10 @@ def _classify_job_search_emails_between(
                 "reason": cached_record.get(
                     "reason"
                 ),
+                "location_group": cached_record.get(
+                    "location_group",
+                    "OTHER",
+                ),
             }
 
         else:
@@ -719,6 +772,10 @@ def _classify_job_search_emails_between(
                 ),
                 "reason": classification.get(
                     "reason"
+                ),
+                "location_group": classification.get(
+                    "location_group",
+                    "OTHER",
                 ),
                 "thread_id": email_data.get(
                     "thread_id",
@@ -801,6 +858,10 @@ def _classify_job_search_emails_between(
                 ),
                 "reason": classification.get(
                     "reason"
+                ),
+                "location_group": classification.get(
+                    "location_group",
+                    "OTHER",
                 ),
             }
         )
@@ -1151,6 +1212,9 @@ def get_replyable_rejections(
     replyable = []
     skipped_no_reply = []
     skipped_already_replied = []
+
+
+
 
     for message in snapshot[
         "classified_messages"
@@ -1946,6 +2010,14 @@ def get_job_search_dashboard(
         "other": 0,
     }
 
+    geography_counts = {
+        "UAE": 0,
+        "GERMANY": 0,
+        "SINGAPORE": 0,
+        "OTHER": 0,
+        "UNKNOWN": 0,
+    }
+
     label_to_key = {
         "APPLICATION_CONFIRMATION":
             "applications_submitted",
@@ -1962,6 +2034,25 @@ def get_job_search_dashboard(
     for message in snapshot[
         "classified_messages"
     ]:
+        if (
+            message.get("label")
+            == "APPLICATION_CONFIRMATION"
+        ):
+            location_group = message.get(
+                "location_group",
+                "UNKNOWN",
+            )
+
+            if (
+                location_group
+                not in geography_counts
+            ):
+                location_group = "UNKNOWN"
+
+            geography_counts[
+                location_group
+            ] += 1
+
         raw_date = message.get(
             "date",
             "",
@@ -2048,6 +2139,28 @@ def get_job_search_dashboard(
             "recruiter_replies":
                 snapshot[
                     "recruiter_replies"
+                ],
+        },
+        "geography": {
+            "UAE":
+                geography_counts[
+                    "UAE"
+                ],
+            "GERMANY":
+                geography_counts[
+                    "GERMANY"
+                ],
+            "SINGAPORE":
+                geography_counts[
+                    "SINGAPORE"
+                ],
+            "OTHER":
+                geography_counts[
+                    "OTHER"
+                ],
+            "UNKNOWN":
+                geography_counts[
+                    "UNKNOWN"
                 ],
         },
         "yesterday": {
@@ -2146,6 +2259,13 @@ def format_job_search_dashboard(
         f"{totals['recruiter_replies']}\n"
         f"Rejection replies sent total: "
         f"{total_rejection_replies}\n\n"
+
+        "APPLICATION GEOGRAPHY\n"
+        f"UAE: {dashboard['geography']['UAE']}\n"
+        f"Germany: {dashboard['geography']['GERMANY']}\n"
+        f"Singapore: {dashboard['geography']['SINGAPORE']}\n"
+        f"Other: {dashboard['geography']['OTHER']}\n"
+        f"Unknown: {dashboard['geography']['UNKNOWN']}\n\n"
 
         f"Yesterday ({yesterday['date']}):\n"
         f"+{yesterday['applications_submitted']} applications\n"
